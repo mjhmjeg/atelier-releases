@@ -1,0 +1,152 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  :root { --bg:#1b1b1a; --surface:#242423; --text:#ecebe6; --muted:#9b9a94; --line:#3a3a37; --accent:#e5484d; --ok:#5fd38d; --warn:#f5a524; }
+  body { font: 13px/1.45 -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; padding: 16px; color: var(--text); background: var(--bg); }
+  h1 { font: 400 17px Georgia, serif; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 12px; }
+  button { font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--text); cursor: pointer; width: 100%; margin-top: 8px; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .step { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .step .k { width: 56px; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+  .step .n { flex: 1; }
+  .conflict { color: var(--warn); font-size: 12px; }
+  .choice { display: flex; gap: 10px; font-size: 12px; margin-top: 4px; }
+  .msg { margin-top: 10px; font-size: 12px; min-height: 16px; }
+  .msg.err { color: var(--accent); } .msg.ok { color: var(--ok); }
+  details { margin-top: 18px; color: var(--muted); } details button { font-size: 12px; padding: 6px; }
+  pre { white-space: pre-wrap; font-size: 11px; color: var(--muted); max-height: 160px; overflow: auto; }
+  input[type=file] { margin-top: 8px; color: var(--muted); }
+</style>
+</head>
+<body>
+  <div id="view"><p>Loading…</p></div>
+  <div class="msg" id="msg" role="status"></div>
+  <details>
+    <summary>Developer</summary>
+    <button data-dev="devDemo">Create demo shapes</button>
+    <button data-dev="devEditOffline">Simulate offline edits</button>
+    <button data-dev="devEditCloud">Simulate cloud edits</button>
+    <button data-dev="devReport">Report shapes</button>
+    <pre id="log"></pre>
+  </details>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const send = (cmd, extra = {}) => parent.postMessage({ cmd, ...extra }, "*");
+  const say = (t, kind = "") => { $("msg").textContent = t; $("msg").className = "msg " + kind; };
+  const h = (html) => { $("view").innerHTML = html; };
+  let dump = null, plan = null;
+
+  function download(name, data, type) {
+    const blob = new Blob([data], { type });
+    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: name });
+    document.body.append(a); a.click(); a.remove();
+  }
+
+  function render(status) {
+    if (status.role === "none") {
+      h(`<h1>Take this file offline</h1>
+         <p>Saves a version as a safety net, marks every element, and downloads a copy for your local Penpot. Edit it offline, then bring your changes back here.</p>
+         <button class="primary" id="take">Take offline</button>`);
+      $("take").onclick = () => { $("take").disabled = true; say("Saving version and preparing copy…"); send("takeOffline"); };
+    } else if (status.role === "original") {
+      h(`<h1>Offline since ${new Date(status.marker.takenAt).toLocaleString()}</h1>
+         <p>Load the changes from your offline copy.</p>
+         <button class="primary" id="load">Load changes from this Mac</button>
+         <p style="margin-top:8px">or choose a changes file: <input type="file" id="file" accept=".json,application/json" /></p>
+         <div id="plan"></div>
+         <button id="cancel">Cancel offline mode</button>`);
+      $("file").onchange = async (ev) => {
+        const f = ev.target.files[0]; if (!f) return;
+        try { dump = JSON.parse(await f.text()); } catch { return say("That file is not readable.", "err"); }
+        say("Comparing…"); send("plan", { dump });
+      };
+      if (location.protocol === "https:") $("load").style.display = "none";
+      $("load").onclick = async () => {
+        try {
+          const r = await fetch(BRIDGE);
+          if (r.status === 404) return say("No changes waiting. Export them from the offline copy first.", "err");
+          dump = await r.json();
+          say("Comparing…"); send("plan", { dump });
+        } catch (e) { say("Atelier's hand-off isn't reachable. Choose the changes file instead.", "err"); }
+      };
+      $("cancel").onclick = () => { if (confirm("Stop offline mode? Changes made offline will not be brought back.")) send("cancelOffline"); };
+    } else {
+      h(`<h1>Offline copy of “${status.marker.fileName}”</h1>
+         <p>When you're back online, export your changes and open the original file in the cloud.</p>
+         <button class="primary" id="export">Export changes</button>`);
+      $("export").onclick = () => send("exportChanges");
+    }
+  }
+
+  function renderPlan(p) {
+    plan = p;
+    const rows = p.steps.map((s) => `
+      <div class="step"><span class="k">${s.kind}</span><span class="n">${s.name}
+        ${s.conflict ? `<div class="conflict">Conflict: ${s.reason}</div>
+          <div class="choice">
+            <label><input type="radio" name="c-${s.id}" value="cloud" checked> Keep cloud</label>
+            <label><input type="radio" name="c-${s.id}" value="offline"> Use offline</label>
+          </div>` : ""}
+      </span></div>`).join("");
+    const skipped = p.skipped.length ? `<p style="margin-top:8px">Not synced (not supported yet): ${p.skipped.join(", ")}</p>` : "";
+    $("plan").innerHTML = (p.steps.length ? rows : "<p>No changes found.</p>") + skipped +
+      (p.steps.length ? `<button class="primary" id="apply">Apply ${p.steps.length} change${p.steps.length > 1 ? "s" : ""}</button>` : "");
+    if (p.steps.length) $("apply").onclick = () => {
+      const choices = {};
+      document.querySelectorAll("input[type=radio]:checked").forEach((r) => (choices[r.name.slice(2)] = r.value));
+      $("apply").disabled = true; say("Applying…"); send("apply", { dump, choices });
+    };
+  }
+
+  const BRIDGE = "http://localhost:4400/bridge/changes";
+  window.addEventListener("message", async (ev) => {
+    const m = ev.data;
+    if (!m || !m.cmd) return;
+    devResult(m);
+    if (!m.ok) return say(m.error, "err");
+    const r = m.result;
+    switch (m.cmd) {
+      case "status": return render(r);
+      case "takeOffline":
+        if (r.download) {
+          download(r.download.name, new Uint8Array(r.download.bytes), "application/octet-stream");
+          say(`Done. ${r.tagged} elements marked, copy downloaded. Import it into your local Penpot.`, "ok");
+        } else {
+          say(`Done. ${r.tagged} elements marked and a version saved. Now download the copy: main menu › File › Download (.penpot), then import it into your local Penpot.`, "ok");
+        }
+        return send("status");
+      case "exportChanges":
+        download(r.download.name, r.download.text, "application/json");
+        fetch(BRIDGE, { method: "POST", headers: { "Content-Type": "application/json" }, body: r.download.text }).catch(() => {});
+        return say(`Saved “${r.download.name}” to Downloads. Back online, open the original file and choose it under Bring back.`, "ok");
+      case "plan": return renderPlan(r), say(`${r.steps.filter((s) => s.conflict).length} conflict(s) to decide.`);
+      case "apply":
+        say(`Brought back: ${r.created} new, ${r.updated} changed, ${r.deleted} removed, ${r.keptCloud} kept as in the cloud. Saved as a version.`, "ok");
+        return send("status");
+      case "cancelOffline": say(r, "ok"); return send("status");
+      default: $("log").textContent = JSON.stringify(r, null, 1) + "\n" + $("log").textContent;
+    }
+  });
+  // Dev-only test hook (plugin served from the dev server): run queued commands, report results.
+  const DEV = location.origin === "http://localhost:4400";
+  const devResult = (m) => DEV && fetch("http://localhost:4400/dev/result", { method: "POST", body: JSON.stringify(m, (k, v) => (k === "bytes" ? `<${v.length} bytes>` : v)) }).catch(() => {});
+  if (DEV) setInterval(async () => {
+    const c = await fetch("http://localhost:4400/dev/cmd").then((r) => r.json()).catch(() => null);
+    if (!c) return;
+    if (c.cmd === "ui:load") return $("load").click();
+    if (c.cmd === "ui:apply") {
+      if (c.choices) for (const [id, v] of Object.entries(c.choices)) { const r = document.querySelector(`input[name="c-${id}"][value="${v}"]`); if (r) r.checked = true; }
+      return $("apply").click();
+    }
+    if (c.cmd === "ui:text") return devResult({ cmd: "ui:text", view: $("view").innerText, msg: $("msg").innerText });
+    send(c.cmd, c);
+  }, 700);
+  document.querySelectorAll("[data-dev]").forEach((b) => (b.onclick = () => send(b.dataset.dev)));
+  send("status");
+</script>
+</body>
+</html>
