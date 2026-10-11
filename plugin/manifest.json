@@ -3,7 +3,7 @@
   "name": "Atelier Sync (prototype)",
   "host": "https://mjhmjeg.github.io/atelier-releases/plugin/",
   "code": "plugin.js",
-  "description": "Take a file offline and bring the changes back. Day-1 test build.",
+  "description": "Take a Penpot file offline and bring your changes back safely (prototype).",
   "permissions": [
     "content:read",
     "content:write",
